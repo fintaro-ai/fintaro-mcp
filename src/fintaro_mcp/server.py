@@ -6,10 +6,12 @@ Tools (all bound to the org carried by the presented ``ftk_`` key):
 * ``upload_invoice`` — upload a local receipt (PDF/PNG/JPEG/WebP), client-side
   validated, returns ``{invoice_id, status: "processing", deduplicated}``.
 * ``get_invoice`` — a narrow, PII-stripped projection of one invoice.
-* ``list_invoices`` — narrow projections of the org's invoices.
-* ``list_transactions`` — narrow, PII-stripped projections of the org's
-  transactions, paginated to exhaustion: ``{"transactions": [...], "total": n}``.
-* ``list_unmatched`` — same shape, only transactions still missing a receipt.
+* ``list_invoices`` — one bounded page of narrow invoice projections.
+* ``list_transactions`` — one bounded page of narrow, PII-stripped transaction
+  projections: ``{"transactions": [...], "total", "offset", "limit", "returned",
+  "hasMore"}``. The caller pages with ``offset``/``limit`` and may narrow with
+  ``date_from``/``date_to`` instead of pulling all history.
+* ``list_unmatched`` — same shape/paging, only transactions still missing a receipt.
 
 The pure ``*_impl`` functions take an explicit client so they are unit-testable
 against a fake/mocked gateway; the ``@mcp.tool()`` wrappers build a real client
@@ -96,43 +98,47 @@ def get_invoice_impl(client: Any, organization_id: str, invoice_id: str) -> dict
     return InvoiceSummary.from_gateway(row).model_dump()
 
 
-#: Gateway page size for /invoices/, and a safety cap across pages.
+#: Gateway max page size for /invoices/; also the default and clamp ceiling.
 _INVOICE_PAGE_LIMIT = 100
-_INVOICE_MAX_ROWS = 1000
 
 
-def list_invoices_impl(client: Any, organization_id: str) -> list[dict]:
-    """List the org's invoices as narrow projections, newest-first.
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(int(value), hi))
 
-    The gateway orders ``/invoices/`` by ``created_at`` desc and caps each page,
-    so this pages through to exhaustion (bounded by a safety cap). Paging is what
-    makes a just-uploaded invoice reachable instead of stranded beyond an
-    unpaginated first page.
+
+def list_invoices_impl(client: Any, organization_id: str, *, offset: int = 0, limit: int = _INVOICE_PAGE_LIMIT) -> dict:
+    """List one bounded page of the org's invoices, newest-first.
+
+    The gateway orders ``/invoices/`` by ``created_at`` desc, so page 0 holds the
+    newest invoices (a just-uploaded one is reachable there). ONE call fetches ONE
+    page; the caller advances ``offset`` to read further. ``/invoices/`` returns a
+    bare list with no total, so ``hasMore`` is inferred from page fullness and
+    ``total`` is ``None`` (unknown).
+
+    Returns ``{"invoices", "total", "offset", "limit", "returned", "hasMore"}``.
     """
-    summaries: list[dict] = []
-    offset = 0
-    while True:
-        page = (
-            client.get(
-                "/invoices/",
-                params={
-                    "organization_id": organization_id,
-                    "offset": offset,
-                    "limit": _INVOICE_PAGE_LIMIT,
-                },
-            )
-            or []
+    offset = max(0, int(offset))
+    limit = _clamp(limit, 1, _INVOICE_PAGE_LIMIT)
+    page = (
+        client.get(
+            "/invoices/",
+            params={"organization_id": organization_id, "offset": offset, "limit": limit},
         )
-        summaries.extend(InvoiceSummary.from_gateway(row).model_dump() for row in page)
-        if len(page) < _INVOICE_PAGE_LIMIT or len(summaries) >= _INVOICE_MAX_ROWS:
-            break
-        offset += len(page)
-    return summaries
+        or []
+    )
+    summaries = [InvoiceSummary.from_gateway(row).model_dump() for row in page]
+    return {
+        "invoices": summaries,
+        "total": None,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(summaries),
+        "hasMore": len(page) >= limit,
+    }
 
 
-#: Gateway page-size cap for /transactions/search, and a safety cap across pages.
+#: Gateway max page size for /transactions/search; also the default and clamp ceiling.
 _SEARCH_PAGE_LIMIT = 200
-_SEARCH_MAX_ROWS = 1000
 
 
 def _transaction_rows(payload: Any) -> list:
@@ -148,48 +154,92 @@ def _transaction_rows(payload: Any) -> list:
 
 
 def _search_transaction_summaries(
-    client: Any, organization_id: str, extra_params: Mapping[str, Any] | None = None
+    client: Any,
+    organization_id: str,
+    *,
+    offset: int = 0,
+    limit: int = _SEARCH_PAGE_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    extra_params: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Fetch matching transactions across ALL result pages as narrow projections.
+    """Fetch ONE bounded page of matching transactions as narrow projections.
 
-    Returns ``{"transactions": [...], "total": n}`` so the caller can detect the
-    rare case where the safety cap truncated the list (``total > len(transactions)``).
+    One call == one gateway request. ``offset``/``limit`` (clamped to the gateway
+    page size) and the optional ``date_from``/``date_to`` ISO bounds let the caller
+    page and narrow the result; ``hasMore`` (verbatim from the gateway) and
+    ``total`` tell the caller whether to advance ``offset``. This replaces the old
+    page-to-a-safety-cap loop that silently dropped everything past 1000 rows.
+
+    Returns ``{"transactions", "total", "offset", "limit", "returned", "hasMore"}``.
     """
-    params: dict = {"organization_id": organization_id, "limit": _SEARCH_PAGE_LIMIT, "offset": 0}
+    offset = max(0, int(offset))
+    limit = _clamp(limit, 1, _SEARCH_PAGE_LIMIT)
+    params: dict = {"organization_id": organization_id, "limit": limit, "offset": offset}
+    if date_from is not None:
+        params["dateFrom"] = date_from
+    if date_to is not None:
+        params["dateTo"] = date_to
     if extra_params:
         params.update(extra_params)
 
-    transactions: list[dict] = []
-    total: int | None = None
-    while True:
-        payload = client.get("/transactions/search", params=dict(params))
-        rows = _transaction_rows(payload)
-        transactions.extend(TransactionSummary.from_gateway(row).model_dump() for row in rows)
-        if not isinstance(payload, Mapping):
-            break
+    payload = client.get("/transactions/search", params=params)
+    rows = _transaction_rows(payload)
+    transactions = [TransactionSummary.from_gateway(row).model_dump() for row in rows]
+
+    pagination: Mapping = {}
+    if isinstance(payload, Mapping):
         pagination = payload.get("pagination") or {}
-        if total is None:
-            total = pagination.get("total")
-        if not pagination.get("hasMore") or not rows or len(transactions) >= _SEARCH_MAX_ROWS:
-            break
-        params["offset"] += len(rows)
-
-    return {"transactions": transactions, "total": total if total is not None else len(transactions)}
-
-
-def list_transactions_impl(client: Any, organization_id: str) -> dict:
-    """The org's transactions as narrow, PII-stripped projections.
-
-    Returns ``{"transactions": [...], "total": n}``; ``total > len(transactions)``
-    means the safety cap truncated the list."""
-    return _search_transaction_summaries(client, organization_id)
+    total = pagination.get("total")
+    return {
+        "transactions": transactions,
+        "total": total if total is not None else len(transactions),
+        "offset": offset,
+        "limit": limit,
+        "returned": len(transactions),
+        "hasMore": bool(pagination.get("hasMore")),
+    }
 
 
-def list_unmatched_impl(client: Any, organization_id: str) -> dict:
-    """Transactions that still need a receipt (unmatched), as narrow projections.
+def list_transactions_impl(
+    client: Any,
+    organization_id: str,
+    *,
+    offset: int = 0,
+    limit: int = _SEARCH_PAGE_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """One page of the org's transactions as narrow, PII-stripped projections.
 
-    Same ``{"transactions", "total"}`` shape as ``list_transactions_impl``."""
-    return _search_transaction_summaries(client, organization_id, {"matchStatus": "unmatched"})
+    Returns ``{"transactions", "total", "offset", "limit", "returned", "hasMore"}``;
+    ``hasMore`` true means advance ``offset`` by ``limit`` for the next page."""
+    return _search_transaction_summaries(
+        client, organization_id, offset=offset, limit=limit, date_from=date_from, date_to=date_to
+    )
+
+
+def list_unmatched_impl(
+    client: Any,
+    organization_id: str,
+    *,
+    offset: int = 0,
+    limit: int = _SEARCH_PAGE_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """One page of transactions that still need a receipt (unmatched).
+
+    Same envelope as ``list_transactions_impl``."""
+    return _search_transaction_summaries(
+        client,
+        organization_id,
+        offset=offset,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        extra_params={"matchStatus": "unmatched"},
+    )
 
 
 def monatsabschluss_check_text() -> str:
@@ -197,8 +247,11 @@ def monatsabschluss_check_text() -> str:
     return (
         "Du bist Buchhaltungs-Assistent fuer den Monatsabschluss.\n\n"
         "Vorgehen vor dem Abschluss:\n"
-        "1. Rufe das Tool `list_unmatched` auf, um alle Transaktionen zu finden, "
-        "die noch keinen Beleg haben (unmatched).\n"
+        "1. Rufe das Tool `list_unmatched` auf, um Transaktionen ohne Beleg "
+        "(unmatched) zu finden. Das Tool liefert eine Seite pro Aufruf; solange "
+        "`hasMore` true ist, rufe es erneut mit um `limit` erhoehtem `offset` auf, "
+        "bis alle offenen Posten erfasst sind. Fuer einen Monat kannst du den "
+        "Zeitraum mit `date_from`/`date_to` (ISO) eingrenzen.\n"
         "2. Fasse zusammen, welche Belege noch fehlen — pro offener Transaktion "
         "Datum, Betrag und Gegenseite —, damit der Nutzer sie nachreichen kann.\n"
         "3. Weise darauf hin, dass eine automatische Pruefung des Export-Status "
@@ -233,28 +286,53 @@ def get_invoice(invoice_id: str) -> dict:
 
 
 @mcp.tool()
-def list_invoices() -> list[dict]:
-    """List the organization's invoices as narrow, PII-free summaries."""
+def list_invoices(offset: int = 0, limit: int = _INVOICE_PAGE_LIMIT) -> dict:
+    """List one page of the organization's invoices as narrow, PII-free summaries.
+
+    Newest-first. One call returns one page; if `hasMore` is true, call again with
+    `offset` advanced by `limit` (clamped to 100). `total` is unknown (the gateway
+    list endpoint returns no count).
+
+    Returns {"invoices", "total", "offset", "limit", "returned", "hasMore"}."""
     with _client() as client:
-        return list_invoices_impl(client, _org())
+        return list_invoices_impl(client, _org(), offset=offset, limit=limit)
 
 
 @mcp.tool()
-def list_transactions() -> dict:
-    """List the organization's bank transactions as narrow, PII-free summaries.
+def list_transactions(
+    offset: int = 0,
+    limit: int = _SEARCH_PAGE_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """List one page of the organization's bank transactions as narrow summaries.
 
-    Returns {"transactions": [...], "total": n} across all result pages."""
+    One call returns one page; if `hasMore` is true, call again with `offset`
+    advanced by `limit` (clamped to 200). Narrow the window with `date_from` /
+    `date_to` (ISO dates, e.g. "2026-06-01") to cover a period without paging all
+    history.
+
+    Returns {"transactions", "total", "offset", "limit", "returned", "hasMore"}."""
     with _client() as client:
-        return list_transactions_impl(client, _org())
+        return list_transactions_impl(client, _org(), offset=offset, limit=limit, date_from=date_from, date_to=date_to)
 
 
 @mcp.tool()
-def list_unmatched() -> dict:
-    """List transactions that still need a matching receipt, as narrow summaries.
+def list_unmatched(
+    offset: int = 0,
+    limit: int = _SEARCH_PAGE_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """List one page of transactions that still need a matching receipt.
 
-    Returns {"transactions": [...], "total": n} across all result pages."""
+    Same paging/filtering contract as `list_transactions`: one page per call,
+    advance `offset` by `limit` while `hasMore`, optionally bound by `date_from` /
+    `date_to`. For a month-end close, pass the period's bounds.
+
+    Returns {"transactions", "total", "offset", "limit", "returned", "hasMore"}."""
     with _client() as client:
-        return list_unmatched_impl(client, _org())
+        return list_unmatched_impl(client, _org(), offset=offset, limit=limit, date_from=date_from, date_to=date_to)
 
 
 @mcp.prompt()

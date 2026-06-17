@@ -102,9 +102,9 @@ def test_list_invoices_wrapper_uses_org_from_whoami(monkeypatch: pytest.MonkeyPa
     captured_org_ids: list[str] = []
     original_impl = server.list_invoices_impl
 
-    def _spy_impl(client, organization_id: str):
+    def _spy_impl(client, organization_id: str, **kwargs):
         captured_org_ids.append(organization_id)
-        return original_impl(client, organization_id)
+        return original_impl(client, organization_id, **kwargs)
 
     monkeypatch.setattr(server, "list_invoices_impl", _spy_impl)
 
