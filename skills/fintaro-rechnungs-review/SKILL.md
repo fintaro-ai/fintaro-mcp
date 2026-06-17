@@ -46,6 +46,9 @@ Roh-JSON, keine Steuer-IDs/E-Mails, keine Match-Interna.
 
 - `amount` (Transaktion) kommt als String vom Gateway — vor dem Rechnen ggf.
   parsen.
+- `matchStatus` ist ein freier Status-String; der Wert für eine offene Transaktion
+  ohne Beleg ist `missing` (nicht `unmatched`). Nicht auf einen bestimmten Wert
+  hartkodieren — für offene Posten nutze besser `list_unmatched`.
 - Keine Felder erfinden, die nicht in der Projektion enthalten sind, und keine
   PII anfordern.
 

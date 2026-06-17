@@ -39,6 +39,8 @@ dem MCP-Prompt `monatsabschluss_check`.
 
 ## Hinweise
 
+- `list_unmatched` filtert die offenen Posten bereits serverseitig — du musst
+  `matchStatus` nicht selbst prüfen (der Wert offener Zeilen ist `missing`).
 - Nur die dokumentierten Projektionsfelder verwenden; keine Match-Interna,
   Steuer-IDs oder Roh-OCR anfordern oder erfinden.
 - Belege hochladen ist ein eigener Workflow → siehe `fintaro-belege-upload`.
