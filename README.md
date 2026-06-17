@@ -24,6 +24,14 @@ the agent's context.
 Prompt: `monatsabschluss_check` — a guided pre-close review that uses
 `list_unmatched` to find transactions still without a receipt.
 
+## Agent skills
+
+Ready-to-use, copy-paste skill definitions that teach an MCP-capable agent real
+Fintaro workflows over these tools live in [`skills/`](skills/README.md) —
+onboarding/setup, the pre-close (Monatsabschluss) review, receipt upload, and an
+invoice/transaction review. Each is a `SKILL.md` usable as an agent skill or as a
+standalone prompt template.
+
 ## Mint an API key
 
 1. In Fintaro, open **Settings → API keys** and create a key.
