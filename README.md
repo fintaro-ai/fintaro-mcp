@@ -1,5 +1,7 @@
 # fintaro-mcp
 
+> 🧠 **[Paperclip MCP – scoped Tools und Finanzdaten-Grenzen](docs/PAPERCLIP-MCP-INTEGRATION.md)** (Plan, 17.10.2026; keine Produktivabnahme)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets an
 MCP-capable agent (Claude Desktop, etc.) read your Fintaro invoices and
 transactions and upload receipts — over the Fintaro API gateway, authenticated
